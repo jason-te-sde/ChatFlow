@@ -9,3 +9,10 @@ High-performance WebSocket chat server and multithreaded load testing client cap
 - [`/client-part2`](https://github.com/jason-te-sde/ChatFlow/tree/main/client-part2) - Enhanced client with detailed metrics (Part 2)
 - [`/results`](https://github.com/jason-te-sde/ChatFlow/tree/main/results) - Test results, charts, and analysis
 - [`README.md`](https://github.com/jason-te-sde/ChatFlow/blob/main/README.md)
+- [`Server Readme.md`](https://github.com/jason-te-sde/ChatFlow/blob/main/README.md)
+- ['Client Readme.md'](https://github.com/jason-te-sde/ChatFlow/blob/main/client-part1/README.md)
+
+## Design Document
+
+### Architecture diagram
+![Architecture Diagram](
