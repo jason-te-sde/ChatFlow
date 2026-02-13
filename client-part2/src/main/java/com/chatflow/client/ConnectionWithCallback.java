@@ -5,11 +5,14 @@ import org.java_websocket.handshake.ServerHandshake;
 import java.net.URI;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Custom WebSocket client that supports response callbacks for RTT measurement
+ * Extends WebSocketClient to add callback mechanism for precise timing
+ */
 public class ConnectionWithCallback extends WebSocketClient {
   private final AtomicReference<ResponseCallback> callbackRef;
   private final Runnable onOpenCallback;
   private final Runnable onCloseCallback;
-  private static boolean debugLogged = false; // Only log once to avoid spam
 
   public ConnectionWithCallback(URI serverUri,
       Runnable onOpenCallback,
@@ -29,10 +32,11 @@ public class ConnectionWithCallback extends WebSocketClient {
 
   @Override
   public void onMessage(String message) {
-    ResponseCallback callback = callbackRef.get(); // ✅ Don't clear yet
+    // Don't clear callback - let it be naturally overwritten by next message
+    // This prevents race conditions in high-throughput scenarios
+    ResponseCallback callback = callbackRef.get();
     if (callback != null) {
       callback.onResponse(System.nanoTime());
-      // Don't clear here - let the next message overwrite it
     }
   }
 
@@ -45,13 +49,21 @@ public class ConnectionWithCallback extends WebSocketClient {
 
   @Override
   public void onError(Exception ex) {
-    System.err.println("DEBUG: WebSocket error: " + ex.getMessage());
+    // Silent error handling to avoid spam
+    // Errors are handled at higher level through timeouts and retries
   }
 
+  /**
+   * Set callback to be invoked when response is received
+   * Callback will be overwritten by subsequent calls
+   */
   public void setResponseCallback(ResponseCallback callback) {
-    callbackRef.set(callback); // Just set, don't clear
+    callbackRef.set(callback);
   }
 
+  /**
+   * Callback interface for receiving response notifications
+   */
   public interface ResponseCallback {
     void onResponse(long receiveTimeNanos);
   }

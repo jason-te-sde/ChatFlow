@@ -1,42 +1,49 @@
 package com.chatflow.client;
 
-import com.chatflow.client.PerformanceMetrics;
-
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.*;
 
 public class EnhancedLoadTestClient {
   private static final int TOTAL_MESSAGES = 500_000;
+
+  // WARMUP PHASE: Keep 32 threads as required by assignment
   private static final int WARMUP_THREADS = 32;
   private static final int MESSAGES_PER_WARMUP_THREAD = 1000;
   private static final int WARMUP_TOTAL = WARMUP_THREADS * MESSAGES_PER_WARMUP_THREAD;
   private static final int MAIN_PHASE_MESSAGES = TOTAL_MESSAGES - WARMUP_TOTAL;
 
+  // OPTIMIZATION: Limit main phase threads to prevent overwhelming t2.micro
+  private static final int MAX_MAIN_THREADS = 256;
+
+  // OPTIMIZATION: Rate limiting to prevent server overload
+  private static final int MESSAGES_PER_SECOND_LIMIT = 1000;
+
   private final String serverUrl;
   private final BlockingQueue<MessageWrapper> messageQueue;
   private final PerformanceMetrics metrics;
+  private final RateLimiter rateLimiter;
 
   public EnhancedLoadTestClient(String serverUrl) {
     this.serverUrl = serverUrl;
     this.messageQueue = new LinkedBlockingQueue<>(100000);
     this.metrics = new PerformanceMetrics();
+    this.rateLimiter = new RateLimiter(MESSAGES_PER_SECOND_LIMIT);
   }
 
   public void runLoadTest() {
     System.out.println("=".repeat(70));
-    System.out.println("ChatFlow Enhanced Load Test Client (Part 2)");
+    System.out.println("ChatFlow Enhanced Load Test - Optimized for t2.micro");
     System.out.println("=".repeat(70));
     System.out.println("Server URL: " + serverUrl);
     System.out.println("Total Messages: " + TOTAL_MESSAGES);
-    System.out.println("Includes: CSV output + Performance charts");
+    System.out.println("Warmup: " + WARMUP_THREADS + " threads × " + MESSAGES_PER_WARMUP_THREAD + " msgs");
+    System.out.println("Main Phase: Max " + MAX_MAIN_THREADS + " threads");
+    System.out.println("Rate Limit: " + MESSAGES_PER_SECOND_LIMIT + " msg/s");
     System.out.println("=".repeat(70));
 
+    // Start message generator thread
     Thread generatorThread = new Thread(
         new MessageGenerator(messageQueue, TOTAL_MESSAGES),
         "MessageGenerator"
@@ -44,24 +51,41 @@ public class EnhancedLoadTestClient {
     generatorThread.start();
     System.out.println("✓ Message generator thread started");
 
-    try {
-      Thread.sleep(2000);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
+    // Wait for initial message buffer to fill
+    System.out.println("Building initial message buffer...");
+    while (messageQueue.size() < 5000) {
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        break;
+      }
     }
+    System.out.println("✓ Buffer ready with " + messageQueue.size() + " messages");
 
+    // WARMUP PHASE
     System.out.println("\n--- WARMUP PHASE ---");
     metrics.startWarmup();
     runWarmupPhase();
     metrics.endWarmup();
     System.out.println("✓ Warmup completed");
 
+    // Pause to allow server recovery between phases
+    System.out.println("\n⏸ Pausing 5 seconds to allow server recovery...");
+    try {
+      Thread.sleep(5000);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+
+    // MAIN PHASE
     System.out.println("\n--- MAIN PHASE ---");
     metrics.startMainPhase();
     runMainPhase();
     metrics.endMainPhase();
     System.out.println("✓ Main phase completed");
 
+    // Wait for generator to finish
     try {
       generatorThread.join();
     } catch (InterruptedException e) {
@@ -83,7 +107,8 @@ public class EnhancedLoadTestClient {
           MESSAGES_PER_WARMUP_THREAD,
           metrics,
           warmupLatch,
-          i
+          i,
+          rateLimiter  // Pass rate limiter to control send rate
       ));
     }
 
@@ -95,15 +120,17 @@ public class EnhancedLoadTestClient {
 
     executor.shutdown();
     try {
-      executor.awaitTermination(10, TimeUnit.MINUTES);
+      executor.awaitTermination(30, TimeUnit.MINUTES);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
   }
 
   private void runMainPhase() {
-    int optimalThreads = Math.min(Runtime.getRuntime().availableProcessors() * 8, 256);
-    System.out.println("Using " + optimalThreads + " threads");
+    // Limit thread count for t2.micro capacity
+    int optimalThreads = Math.min(MAX_MAIN_THREADS,
+        Runtime.getRuntime().availableProcessors() * 8);
+    System.out.println("Using " + optimalThreads + " threads (optimized for t2.micro)");
 
     ExecutorService executor = Executors.newFixedThreadPool(optimalThreads);
     CountDownLatch mainLatch = new CountDownLatch(optimalThreads);
@@ -119,7 +146,8 @@ public class EnhancedLoadTestClient {
           messagesToSend,
           metrics,
           mainLatch,
-          i
+          i,
+          rateLimiter  // Pass rate limiter to control send rate
       ));
     }
 
@@ -131,7 +159,7 @@ public class EnhancedLoadTestClient {
 
     executor.shutdown();
     try {
-      executor.awaitTermination(15, TimeUnit.MINUTES);
+      executor.awaitTermination(30, TimeUnit.MINUTES);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
@@ -173,7 +201,6 @@ public class EnhancedLoadTestClient {
     System.out.println("Min response time: " + stats.min + " ms");
     System.out.println("Max response time: " + stats.max + " ms");
 
-    // PART 3 REQUIREMENT: Throughput per room
     System.out.println("\n--- THROUGHPUT PER ROOM ---");
     Map<Integer, Integer> roomThroughput = metrics.getRoomThroughput();
     for (Map.Entry<Integer, Integer> entry : roomThroughput.entrySet()) {
@@ -183,7 +210,6 @@ public class EnhancedLoadTestClient {
           String.format("%.2f", roomMsgPerSec) + " msg/s)");
     }
 
-    // PART 3 REQUIREMENT: Message type distribution
     System.out.println("\n--- MESSAGE TYPE DISTRIBUTION ---");
     Map<String, Integer> typeDistribution = metrics.getMessageTypeDistribution();
     for (Map.Entry<String, Integer> entry : typeDistribution.entrySet()) {
@@ -204,11 +230,9 @@ public class EnhancedLoadTestClient {
     try {
       System.out.println("\n📊 Generating output files...");
 
-      // Generate metrics CSV
       metrics.writeMetricsCSV("metrics.csv");
       System.out.println("✓ Created: metrics.csv");
 
-      // Generate throughput CSV
       writeThroughputCSV();
       System.out.println("✓ Created: throughput.csv");
 
@@ -230,21 +254,6 @@ public class EnhancedLoadTestClient {
         writer.write(entry.getKey() + "," + entry.getValue() + "\n");
       }
     }
-  }
-
-  private Map<Long, Integer> calculateThroughputOverTime() {
-    // This is a simplified version - you'd track actual timestamps
-    Map<Long, Integer> throughput = new TreeMap<>();
-    long startTime = 0;
-    int bucket = 0;
-
-    // Simulate 10-second buckets
-    for (int i = 0; i < TOTAL_MESSAGES; i += 10000) {
-      throughput.put(bucket * 10000L, 10000);
-      bucket++;
-    }
-
-    return throughput;
   }
 
   public static void main(String[] args) {

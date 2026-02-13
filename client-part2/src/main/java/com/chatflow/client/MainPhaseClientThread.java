@@ -1,6 +1,7 @@
 package com.chatflow.client;
 
 import com.google.gson.Gson;
+
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
@@ -8,6 +9,11 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Main phase thread - maintains persistent WebSocket connections per room
+ * Uses rate limiting to prevent server overload
+ * Optimized for sustained high-volume message sending
+ */
 public class MainPhaseClientThread implements Runnable {
   private final String serverUrl;
   private final BlockingQueue<MessageWrapper> messageQueue;
@@ -16,7 +22,9 @@ public class MainPhaseClientThread implements Runnable {
   private final CountDownLatch completionLatch;
   private final Gson gson;
   private final int threadId;
+  private final RateLimiter rateLimiter;  // Rate limiter to control send rate
 
+  // Connection cache: persistent connections per room for this thread
   private final Map<Integer, ConnectionWithCallback> connectionCache;
 
   public MainPhaseClientThread(String serverUrl,
@@ -24,7 +32,8 @@ public class MainPhaseClientThread implements Runnable {
       int messagesToSend,
       PerformanceMetrics metrics,
       CountDownLatch completionLatch,
-      int threadId) {
+      int threadId,
+      RateLimiter rateLimiter) {
     this.serverUrl = serverUrl;
     this.messageQueue = messageQueue;
     this.messagesToSend = messagesToSend;
@@ -32,6 +41,7 @@ public class MainPhaseClientThread implements Runnable {
     this.completionLatch = completionLatch;
     this.gson = new Gson();
     this.threadId = threadId;
+    this.rateLimiter = rateLimiter;
     this.connectionCache = new HashMap<>();
   }
 
@@ -41,6 +51,9 @@ public class MainPhaseClientThread implements Runnable {
 
     try {
       while (sent < messagesToSend) {
+        // Rate limiting: acquire permit before sending
+        rateLimiter.acquire();
+
         MessageWrapper wrapper = messageQueue.poll(5, TimeUnit.SECONDS);
         if (wrapper == null) continue;
 
@@ -56,13 +69,15 @@ public class MainPhaseClientThread implements Runnable {
         sendMessage(client, wrapper, roomId);
         sent++;
 
-        if (sent % 500 == 0 && threadId % 10 == 0) {
+        // Progress reporting (only from subset of threads to avoid spam)
+        if (sent % 1000 == 0 && threadId % 5 == 0) {
           System.out.println("Thread " + threadId + " progress: " + sent + "/" + messagesToSend);
         }
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     } finally {
+      // Close all persistent connections for this thread
       for (ConnectionWithCallback client : connectionCache.values()) {
         if (client != null && client.isOpen()) {
           client.close();
@@ -72,13 +87,18 @@ public class MainPhaseClientThread implements Runnable {
     }
   }
 
+  /**
+   * Get or create persistent connection for this room
+   * Implements connection pooling per thread for efficiency
+   */
   private ConnectionWithCallback getOrCreateConnection(int roomId) {
     ConnectionWithCallback client = connectionCache.get(roomId);
 
     if (client != null && client.isOpen()) {
-      return client;
+      return client; // Reuse persistent connection
     }
 
+    // Need to create/recreate connection
     if (client != null && !client.isOpen()) {
       metrics.recordReconnection();
     }
@@ -90,6 +110,10 @@ public class MainPhaseClientThread implements Runnable {
     return client;
   }
 
+  /**
+   * Create new WebSocket connection to specified room
+   * Increased timeout to 30 seconds to accommodate slow networks and server load
+   */
   private ConnectionWithCallback createConnection(int roomId) {
     try {
       URI uri = new URI(serverUrl + "/chat/" + roomId);
@@ -98,16 +122,19 @@ public class MainPhaseClientThread implements Runnable {
 
       ConnectionWithCallback client = new ConnectionWithCallback(
           uri,
-          () -> {
+          () -> {  // onOpen callback
             connectionSuccess.set(true);
             connectLatch.countDown();
           },
-          () -> {
+          () -> {  // onClose callback
             metrics.recordConnectionClosed();
           }
       );
 
-      boolean connected = client.connectBlocking(10, TimeUnit.SECONDS);
+      // ADD: Set longer connection timeout for WebSocket
+      client.setConnectionLostTimeout(90);  // 90 seconds keep-alive
+      // Increased connection timeout to 30 seconds (from 10s)
+      boolean connected = client.connectBlocking(30, TimeUnit.SECONDS);
 
       if (connected && connectionSuccess.get()) {
         metrics.recordConnectionCreated();
@@ -120,6 +147,10 @@ public class MainPhaseClientThread implements Runnable {
     }
   }
 
+  /**
+   * Send message with retry logic and exponential backoff
+   * Records detailed metrics for each successful send including actual RTT
+   */
   private void sendMessage(ConnectionWithCallback client, MessageWrapper wrapper, int roomId) {
     int attempt = 0;
 
@@ -129,15 +160,19 @@ public class MainPhaseClientThread implements Runnable {
           client = getOrCreateConnection(roomId);
           if (client == null) {
             attempt++;
-            Thread.sleep((long) Math.pow(2, attempt) * 100);
+            // Increased backoff time from 100ms to 200ms
+            Thread.sleep((long) Math.pow(2, attempt) * 200);
             continue;
           }
         }
 
+        // TIMING: Record send time for RTT measurement
         long sendTime = System.nanoTime();
+
         CountDownLatch responseLatch = new CountDownLatch(1);
         AtomicLong receiveTime = new AtomicLong(0);
 
+        // Set callback BEFORE sending - captures REAL response time
         client.setResponseCallback((receiveTimeNanos) -> {
           receiveTime.set(receiveTimeNanos);
           responseLatch.countDown();
@@ -146,7 +181,8 @@ public class MainPhaseClientThread implements Runnable {
         String messageJson = gson.toJson(wrapper.getMessage());
         client.send(messageJson);
 
-        boolean responded = responseLatch.await(3, TimeUnit.SECONDS);
+        // Increased response wait timeout to 5 seconds (from 3s)
+        boolean responded = responseLatch.await(5, TimeUnit.SECONDS);
 
         if (responded && receiveTime.get() > 0) {
           long latencyMs = (receiveTime.get() - sendTime) / 1_000_000;
@@ -163,14 +199,15 @@ public class MainPhaseClientThread implements Runnable {
 
         attempt++;
         if (attempt < 5) {
-          Thread.sleep((long) Math.pow(2, attempt) * 100);
+          // Increased backoff base from 100ms to 200ms
+          Thread.sleep((long) Math.pow(2, attempt) * 200);
         }
 
       } catch (Exception e) {
         attempt++;
         try {
           if (attempt < 5) {
-            Thread.sleep((long) Math.pow(2, attempt) * 100);
+            Thread.sleep((long) Math.pow(2, attempt) * 200);
           }
         } catch (InterruptedException ie) {
           Thread.currentThread().interrupt();

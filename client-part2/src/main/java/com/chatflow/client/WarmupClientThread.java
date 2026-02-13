@@ -1,22 +1,20 @@
 package com.chatflow.client;
 
 import com.google.gson.Gson;
+
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import org.java_websocket.client.WebSocketClient;
 
 /**
  * Warmup phase thread - each thread establishes WebSocket connections and sends 1000 messages
  * Maintains multiple connections (one per room) for efficiency
+ * Uses rate limiting to prevent server overload
  */
 public class WarmupClientThread implements Runnable {
-
   private final String serverUrl;
   private final BlockingQueue<MessageWrapper> messageQueue;
   private final int messagesToSend;
@@ -24,6 +22,7 @@ public class WarmupClientThread implements Runnable {
   private final CountDownLatch completionLatch;
   private final Gson gson;
   private final int threadId;
+  private final RateLimiter rateLimiter;  // Rate limiter to control send rate
 
   // Connection pool: one connection per room for this thread
   private final Map<Integer, ConnectionWithCallback> connectionsByRoom;
@@ -33,7 +32,8 @@ public class WarmupClientThread implements Runnable {
       int messagesToSend,
       PerformanceMetrics metrics,
       CountDownLatch completionLatch,
-      int threadId) {
+      int threadId,
+      RateLimiter rateLimiter) {
     this.serverUrl = serverUrl;
     this.messageQueue = messageQueue;
     this.messagesToSend = messagesToSend;
@@ -41,6 +41,7 @@ public class WarmupClientThread implements Runnable {
     this.completionLatch = completionLatch;
     this.gson = new Gson();
     this.threadId = threadId;
+    this.rateLimiter = rateLimiter;
     this.connectionsByRoom = new HashMap<>();
   }
 
@@ -50,9 +51,11 @@ public class WarmupClientThread implements Runnable {
 
     try {
       while (sent < messagesToSend) {
+        // Rate limiting: acquire permit before sending
+        rateLimiter.acquire();
+
         MessageWrapper wrapper = messageQueue.poll(5, TimeUnit.SECONDS);
-        if (wrapper == null)
-          continue;
+        if (wrapper == null) continue;
 
         int roomId = wrapper.getRoomId();
 
@@ -74,7 +77,7 @@ public class WarmupClientThread implements Runnable {
       Thread.currentThread().interrupt();
     } finally {
       // Close all connections when thread terminates
-      for (WebSocketClient client : connectionsByRoom.values()) {
+      for (ConnectionWithCallback client : connectionsByRoom.values()) {
         if (client != null && client.isOpen()) {
           client.close();
         }
@@ -84,8 +87,8 @@ public class WarmupClientThread implements Runnable {
   }
 
   /**
-   * Get existing connection for room, or create new one This implements connection pooling per
-   * thread
+   * Get existing connection for room, or create new one
+   * This implements connection pooling per thread
    */
   private ConnectionWithCallback getOrCreateConnection(int roomId) {
     ConnectionWithCallback client = connectionsByRoom.get(roomId);
@@ -106,6 +109,10 @@ public class WarmupClientThread implements Runnable {
     return client;
   }
 
+  /**
+   * Create new WebSocket connection to specified room
+   * Increased timeout to 30 seconds to accommodate slow networks and server load
+   */
   private ConnectionWithCallback createConnection(int roomId) {
     try {
       URI uri = new URI(serverUrl + "/chat/" + roomId);
@@ -114,16 +121,18 @@ public class WarmupClientThread implements Runnable {
 
       ConnectionWithCallback client = new ConnectionWithCallback(
           uri,
-          () -> {  // onOpen
+          () -> {  // onOpen callback
             connectionSuccess.set(true);
             connectLatch.countDown();
           },
-          () -> {  // onClose
+          () -> {  // onClose callback
             metrics.recordConnectionClosed();
           }
       );
 
-      boolean connected = client.connectBlocking(10, TimeUnit.SECONDS);
+      // Increased connection timeout to 30 seconds (from 10s)
+      // This accommodates slow networks and server load on t2.micro
+      boolean connected = client.connectBlocking(30, TimeUnit.SECONDS);
 
       if (connected && connectionSuccess.get()) {
         metrics.recordConnectionCreated();
@@ -136,68 +145,49 @@ public class WarmupClientThread implements Runnable {
     }
   }
 
+  /**
+   * Send message with retry logic and exponential backoff
+   * Records detailed metrics for each successful send
+   */
   private void sendMessage(ConnectionWithCallback client, MessageWrapper wrapper, int roomId) {
     int attempt = 0;
 
     while (attempt < 5) {
       try {
+        // Check if connection is still open
         if (!client.isOpen()) {
+          // Try to reconnect
           client = getOrCreateConnection(roomId);
           if (client == null) {
             attempt++;
-            Thread.sleep((long) Math.pow(2, attempt) * 100);
+            // Increased backoff time from 100ms to 200ms
+            Thread.sleep((long) Math.pow(2, attempt) * 200);
             continue;
           }
         }
 
-        // TIMING: Record send time in nanoseconds
+        // TIMING: Record send time in nanoseconds for RTT calculation
         long sendTime = System.nanoTime();
 
         CountDownLatch responseLatch = new CountDownLatch(1);
         AtomicLong receiveTime = new AtomicLong(0);
 
-        // DEBUG: Add logging for first message
-//        if (threadId == 0 && attempt == 0) {
-//          System.out.println("DEBUG Thread-0: Setting callback before send");
-//        }
-
-        // Set callback BEFORE sending - this captures REAL response time
+        // Set callback BEFORE sending message to capture response time
         client.setResponseCallback((receiveTimeNanos) -> {
           receiveTime.set(receiveTimeNanos);
           responseLatch.countDown();
-
-//          // DEBUG
-//          if (threadId == 0) {
-//            System.out.println("DEBUG Thread-0: Callback executed! ReceiveTime set");
-//          }
         });
 
         String messageJson = gson.toJson(wrapper.getMessage());
         client.send(messageJson);
 
-//        // DEBUG
-//        if (threadId == 0 && attempt == 0) {
-//          System.out.println("DEBUG Thread-0: Message sent, waiting for response...");
-//        }
-
-        // Wait for ACTUAL response from server
-        boolean responded = responseLatch.await(3, TimeUnit.SECONDS);
-
-//        // DEBUG
-//        if (threadId == 0 && attempt == 0) {
-//          System.out.println("DEBUG Thread-0: responded=" + responded +
-//              ", receiveTime=" + receiveTime.get());
-//        }
+        // Increased response wait timeout to 5 seconds (from 3s)
+        // This accommodates server processing delays under load
+        boolean responded = responseLatch.await(5, TimeUnit.SECONDS);
 
         if (responded && receiveTime.get() > 0) {
-          // Calculate REAL latency and record detailed metric
+          // TIMING: Calculate actual RTT for Little's Law analysis
           long latencyMs = (receiveTime.get() - sendTime) / 1_000_000;
-
-//          // DEBUG
-//          if (threadId == 0 && attempt == 0) {
-//            System.out.println("DEBUG Thread-0: Recording metric with latency=" + latencyMs + "ms");
-//          }
-
           metrics.recordDetailedMetric(
               System.currentTimeMillis(),
               wrapper.getMessage().getMessageType().toString(),
@@ -207,27 +197,20 @@ public class WarmupClientThread implements Runnable {
           );
           metrics.recordSuccess();
           return; // Success!
-        } else {
-          // DEBUG
-          if (threadId == 0 && attempt == 0) {
-            System.out.println("DEBUG Thread-0: FAILED - responded=" + responded +
-                ", receiveTime.get()=" + receiveTime.get());
-          }
         }
 
         // Retry with exponential backoff
         attempt++;
         if (attempt < 5) {
-          Thread.sleep((long) Math.pow(2, attempt) * 100);
+          // Increased backoff base from 100ms to 200ms
+          Thread.sleep((long) Math.pow(2, attempt) * 200);
         }
 
       } catch (Exception e) {
-        System.err.println("DEBUG: Exception in sendMessage: " + e.getMessage());
-        e.printStackTrace();
         attempt++;
         try {
           if (attempt < 5) {
-            Thread.sleep((long) Math.pow(2, attempt) * 100);
+            Thread.sleep((long) Math.pow(2, attempt) * 200);
           }
         } catch (InterruptedException ie) {
           Thread.currentThread().interrupt();
@@ -238,7 +221,6 @@ public class WarmupClientThread implements Runnable {
     }
 
     // Failed after 5 retries with exponential backoff
-    System.err.println("DEBUG Thread-" + threadId + ": Message FAILED after 5 retries");
     metrics.recordFailure();
   }
 }
