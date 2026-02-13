@@ -180,7 +180,6 @@ Compare predicted vs actual throughput in your report.
 
 ## Performance Tips
 
-
 1. **Connection Pooling**: Threads reuse WebSocket connections
 2. **Queue Size**: Balanced to avoid memory issues
 3. **Thread Count**: Optimal = CPU cores × 4

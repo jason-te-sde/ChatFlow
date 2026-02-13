@@ -18,7 +18,7 @@
             <configuration>
               <transformers>
                 <transformer>
-                  <mainClass>com.chatflow.client.LoadTestClient</mainClass>
+                  <mainClass>com.chatflow.client.EnhancedLoadTestClient</mainClass>
                 </transformer>
               </transformers>
             </configuration>

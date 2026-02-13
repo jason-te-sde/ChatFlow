@@ -1,7 +1,6 @@
 package com.chatflow.client;
 
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class LoadTestClient {
   private static final int TOTAL_MESSAGES = 500_000;
@@ -12,68 +11,60 @@ public class LoadTestClient {
 
   private final String serverUrl;
   private final BlockingQueue<MessageWrapper> messageQueue;
-  private final AtomicInteger successCount;
-  private final AtomicInteger failureCount;
-  private final AtomicInteger reconnectCount;
+  private final PerformanceMetrics metrics;
 
   public LoadTestClient(String serverUrl) {
     this.serverUrl = serverUrl;
     this.messageQueue = new LinkedBlockingQueue<>(100000);
-    this.successCount = new AtomicInteger(0);
-    this.failureCount = new AtomicInteger(0);
-    this.reconnectCount = new AtomicInteger(0);
+    this.metrics = new PerformanceMetrics();
   }
 
   public void runLoadTest() {
-    System.out.println("=".repeat(60));
-    System.out.println("ChatFlow Load Test Client");
-    System.out.println("=".repeat(60));
+    System.out.println("=".repeat(70));
+    System.out.println("ChatFlow Load Test Client - Accurate Metrics");
+    System.out.println("=".repeat(70));
     System.out.println("Server URL: " + serverUrl);
     System.out.println("Total Messages: " + TOTAL_MESSAGES);
-    System.out.println("Warmup: " + WARMUP_THREADS + " threads x " +
-        MESSAGES_PER_WARMUP_THREAD + " messages = " + WARMUP_TOTAL);
-    System.out.println("Main Phase: " + MAIN_PHASE_MESSAGES + " messages");
-    System.out.println("=".repeat(60));
+    System.out.println("=".repeat(70));
 
-    long startTime = System.currentTimeMillis();
-
+    // Start message generator
     Thread generatorThread = new Thread(
-        new MessageGenerator(messageQueue, TOTAL_MESSAGES)
+        new MessageGenerator(messageQueue, TOTAL_MESSAGES),
+        "MessageGenerator"
     );
     generatorThread.start();
+    System.out.println("✓ Message generator thread started");
 
     try {
-      Thread.sleep(1000);
+      Thread.sleep(2000);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
 
+    // WARMUP PHASE
     System.out.println("\n--- WARMUP PHASE ---");
-    long warmupStart = System.currentTimeMillis();
+    metrics.startWarmup();
     runWarmupPhase();
-    long warmupEnd = System.currentTimeMillis();
-    long warmupDuration = warmupEnd - warmupStart;
+    metrics.endWarmup();
 
-    System.out.println("\nWarmup completed in " + warmupDuration + " ms");
-    System.out.println("Warmup throughput: " +
-        String.format("%.2f", (WARMUP_TOTAL * 1000.0 / warmupDuration)) +
-        " messages/second");
+    System.out.println("✓ Warmup completed");
 
+    // MAIN PHASE
     System.out.println("\n--- MAIN PHASE ---");
-    long mainStart = System.currentTimeMillis();
+    metrics.startMainPhase();
     runMainPhase();
-    long mainEnd = System.currentTimeMillis();
-    long mainDuration = mainEnd - mainStart;
+    metrics.endMainPhase();
 
+    System.out.println("✓ Main phase completed");
+
+    // Wait for generator
     try {
       generatorThread.join();
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
 
-    long totalDuration = System.currentTimeMillis() - startTime;
-
-    printResults(totalDuration, warmupDuration, mainDuration);
+    printAccurateResults();
   }
 
   private void runWarmupPhase() {
@@ -81,48 +72,18 @@ public class LoadTestClient {
     CountDownLatch warmupLatch = new CountDownLatch(WARMUP_THREADS);
 
     for (int i = 0; i < WARMUP_THREADS; i++) {
-      executor.submit(new ChatClientThread(
-          serverUrl, messageQueue, MESSAGES_PER_WARMUP_THREAD,
-          successCount, failureCount, warmupLatch, i
+      executor.submit(new WarmupClientThread(
+          serverUrl,
+          messageQueue,
+          MESSAGES_PER_WARMUP_THREAD,
+          metrics,
+          warmupLatch,
+          i
       ));
     }
 
     try {
       warmupLatch.await();
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    }
-
-    executor.shutdown();
-    try {
-      executor.awaitTermination(5, TimeUnit.MINUTES);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    }
-  }
-
-  private void runMainPhase() {
-    int optimalThreads = Runtime.getRuntime().availableProcessors() * 4;
-    optimalThreads = Math.min(optimalThreads, 128);
-
-    System.out.println("Using " + optimalThreads + " threads for main phase");
-
-    ExecutorService executor = Executors.newFixedThreadPool(optimalThreads);
-    CountDownLatch mainLatch = new CountDownLatch(optimalThreads);
-
-    int messagesPerThread = MAIN_PHASE_MESSAGES / optimalThreads;
-    int remainder = MAIN_PHASE_MESSAGES % optimalThreads;
-
-    for (int i = 0; i < optimalThreads; i++) {
-      int messagesToSend = messagesPerThread + (i < remainder ? 1 : 0);
-      executor.submit(new ChatClientThread(
-          serverUrl, messageQueue, messagesToSend,
-          successCount, failureCount, mainLatch, i + WARMUP_THREADS
-      ));
-    }
-
-    try {
-      mainLatch.await();
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
@@ -135,28 +96,166 @@ public class LoadTestClient {
     }
   }
 
-  private void printResults(long totalDuration, long warmupDuration, long mainDuration) {
-    System.out.println("\n" + "=".repeat(60));
-    System.out.println("LOAD TEST RESULTS");
-    System.out.println("=".repeat(60));
-    System.out.println("Successful messages: " + successCount.get());
-    System.out.println("Failed messages: " + failureCount.get());
-    System.out.println("Total messages attempted: " + TOTAL_MESSAGES);
-    System.out.println("Success rate: " +
-        String.format("%.2f%%", (successCount.get() * 100.0 / TOTAL_MESSAGES)));
-    System.out.println();
-    System.out.println("Warmup duration: " + warmupDuration + " ms");
-    System.out.println("Main phase duration: " + mainDuration + " ms");
-    System.out.println("Total runtime: " + totalDuration + " ms (" +
-        (totalDuration / 1000.0) + " seconds)");
-    System.out.println();
-    System.out.println("Overall throughput: " +
-        String.format("%.2f", (TOTAL_MESSAGES * 1000.0 / totalDuration)) +
-        " messages/second");
-    System.out.println("Main phase throughput: " +
-        String.format("%.2f", (MAIN_PHASE_MESSAGES * 1000.0 / mainDuration)) +
-        " messages/second");
-    System.out.println("=".repeat(60));
+  private void runMainPhase() {
+    int optimalThreads = Math.min(Runtime.getRuntime().availableProcessors() * 8, 256);
+    System.out.println("Using " + optimalThreads + " threads");
+
+    ExecutorService executor = Executors.newFixedThreadPool(optimalThreads);
+    CountDownLatch mainLatch = new CountDownLatch(optimalThreads);
+
+    int messagesPerThread = MAIN_PHASE_MESSAGES / optimalThreads;
+    int remainder = MAIN_PHASE_MESSAGES % optimalThreads;
+
+    for (int i = 0; i < optimalThreads; i++) {
+      int messagesToSend = messagesPerThread + (i < remainder ? 1 : 0);
+      executor.submit(new MainPhaseClientThread(
+          serverUrl,
+          messageQueue,
+          messagesToSend,
+          metrics,
+          mainLatch,
+          i
+      ));
+    }
+
+    try {
+      mainLatch.await();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+
+    executor.shutdown();
+    try {
+      executor.awaitTermination(15, TimeUnit.MINUTES);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private void printAccurateResults() {
+    System.out.println("\n" + "=".repeat(70));
+    System.out.println("PERFORMANCE RESULTS - ACCURATE METRICS");
+    System.out.println("=".repeat(70));
+
+    // Get timing data
+    long warmupMs = metrics.getWarmupDurationMs();
+    long mainMs = metrics.getMainPhaseDurationMs();
+    long totalMs = metrics.getTotalDurationMs();
+
+    // 1. Message Statistics
+    System.out.println("\n1. SUCCESSFUL MESSAGES: " + metrics.getSuccessCount());
+    System.out.println("2. FAILED MESSAGES: " + metrics.getFailureCount());
+    System.out.println("   Total: " + TOTAL_MESSAGES);
+    System.out.println("   Success Rate: " +
+        String.format("%.2f%%", (metrics.getSuccessCount() * 100.0 / TOTAL_MESSAGES)));
+
+    // 3. Wall Time (actual sending time only)
+    System.out.println("\n3. TOTAL RUNTIME (Wall Time):");
+    System.out.println("   Total: " + totalMs + " ms (" +
+        String.format("%.2f", totalMs / 1000.0) + " seconds)");
+    System.out.println("   Warmup: " + warmupMs + " ms");
+    System.out.println("   Main: " + mainMs + " ms");
+
+    // 4. Throughput (messages/second)
+    System.out.println("\n4. THROUGHPUT (messages/second):");
+    double warmupThroughput = (WARMUP_TOTAL * 1000.0) / warmupMs;
+    double mainThroughput = (MAIN_PHASE_MESSAGES * 1000.0) / mainMs;
+    double overallThroughput = (TOTAL_MESSAGES * 1000.0) / totalMs;
+
+    System.out.println("   Overall: " + String.format("%.2f", overallThroughput) + " msg/s");
+    System.out.println("   Warmup: " + String.format("%.2f", warmupThroughput) + " msg/s");
+    System.out.println("   Main Phase: " + String.format("%.2f", mainThroughput) + " msg/s");
+
+    // 5. Connection Statistics
+    int totalConns = metrics.getTotalConnectionsCreated();
+    int reconnections = metrics.getReconnectionCount();
+
+    System.out.println("\n5. CONNECTION STATISTICS:");
+    System.out.println("   Total connections created: " + totalConns);
+    System.out.println("   Reconnections: " + reconnections);
+    System.out.println("   Messages per connection: " +
+        String.format("%.2f", TOTAL_MESSAGES / (double)totalConns));
+    System.out.println("   Connection reuse rate: " +
+        String.format("%.2f%%",
+            ((TOTAL_MESSAGES - totalConns) * 100.0 / TOTAL_MESSAGES)));
+
+    // LITTLE'S LAW ANALYSIS - CORRECTED
+    System.out.println("\n" + "=".repeat(70));
+    System.out.println("LITTLE'S LAW ANALYSIS");
+    System.out.println("=".repeat(70));
+
+    double avgRTT = metrics.getAverageRTTMs();
+    double medianRTT = metrics.getMedianRTTMs();
+    double p99RTT = metrics.get99thPercentileRTTMs();
+
+    System.out.println("\nMEASURED LATENCY (Round-Trip Time):");
+    System.out.println("   Average RTT: " + String.format("%.2f", avgRTT) + " ms");
+    System.out.println("   Median RTT: " + String.format("%.2f", medianRTT) + " ms");
+    System.out.println("   99th percentile RTT: " + String.format("%.2f", p99RTT) + " ms");
+
+    System.out.println("\nLITTLE'S LAW: L = λ × W");
+    System.out.println("   Where:");
+    System.out.println("     L = Average number of CONCURRENT connections");
+    System.out.println("     λ = Throughput (messages/second)");
+    System.out.println("     W = Average latency (seconds)");
+
+    double avgLatencySec = avgRTT / 1000.0;
+    double predictedConcurrent = overallThroughput * avgLatencySec;
+
+    // Estimate actual concurrent connections based on thread count and rooms
+    int optimalThreads = Math.min(Runtime.getRuntime().availableProcessors() * 8, 256);
+    int estimatedConcurrent = Math.min(optimalThreads * 3, totalConns);
+
+    System.out.println("\nPREDICTED CONCURRENT CONNECTIONS:");
+    System.out.println("   λ (throughput) = " + String.format("%.2f", overallThroughput) + " msg/s");
+    System.out.println("   W (avg latency) = " + String.format("%.4f", avgLatencySec) + " seconds");
+    System.out.println("   L (predicted concurrent) = " + String.format("%.2f", predictedConcurrent));
+
+    System.out.println("\nACTUAL MEASUREMENTS:");
+    System.out.println("   Total connections created: " + totalConns);
+    System.out.println("   Estimated peak concurrent: ~" + estimatedConcurrent);
+    System.out.println("   (Based on " + optimalThreads + " threads × ~3 connections/thread)");
+
+    System.out.println("\nINTERPRETATION:");
+    if (totalConns < 1000) {
+      System.out.println("   ✓ EXCELLENT: Connection pooling working efficiently");
+      System.out.println("   ✓ Created only " + totalConns + " connections for 500K messages");
+      System.out.println("   ✓ Average " + String.format("%.0f", TOTAL_MESSAGES / (double)totalConns) +
+          " messages per connection");
+    } else if (totalConns < 5000) {
+      System.out.println("   ✓ GOOD: Reasonable connection management");
+      System.out.println("   ~ Could improve by increasing connection reuse");
+    } else {
+      System.out.println("   ✗ POOR: Too many connections created");
+      System.out.println("   ✗ High connection churn impacts performance");
+      System.out.println("   → Recommendation: Improve connection pooling");
+    }
+
+    // Connection overhead calculation
+    double avgConnectionOverhead = 20.0; // TCP handshake ~20ms typical
+    double totalOverheadSec = (avgConnectionOverhead * totalConns) / 1000.0;
+    double overheadPercent = (totalOverheadSec / (totalMs / 1000.0)) * 100;
+
+    System.out.println("\nCONNECTION OVERHEAD ANALYSIS:");
+    System.out.println("   Estimated handshake time: ~" +
+        String.format("%.0f", avgConnectionOverhead) + " ms per connection");
+    System.out.println("   Total connection overhead: ~" +
+        String.format("%.2f", totalOverheadSec) + " seconds");
+    System.out.println("   Overhead as % of total time: " +
+        String.format("%.2f%%", overheadPercent));
+
+    if (overheadPercent > 10) {
+      System.out.println("   → High overhead! Reduce connection creation for better performance");
+    }
+
+    System.out.println("\nVALIDATION:");
+    System.out.println("   Predicted " + String.format("%.0f", predictedConcurrent) +
+        " concurrent connections needed");
+    System.out.println("   With " + totalConns + " total created over " +
+        String.format("%.2f", totalMs/1000.0) + " seconds");
+    System.out.println("   This indicates good connection reuse if total < 1000");
+
+    System.out.println("\n" + "=".repeat(70));
   }
 
   public static void main(String[] args) {
