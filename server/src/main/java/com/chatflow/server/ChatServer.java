@@ -87,8 +87,10 @@ public class ChatServer extends WebSocketServer {
   public void onStart() {
     System.out.println("ChatFlow WebSocket Server started successfully!");
     System.out.println("Listening on port: " + getPort());
-    setConnectionLostTimeout(30); // Keep connections alive for 30 seconds
-    setTcpNoDelay(true); // Disable Nagle's algorithm for lower latency
+    // OPTIMIZATION: Increase timeouts for slow t2.micro
+    setConnectionLostTimeout(90);     // Increase from 30s to 90s
+    setTcpNoDelay(true);
+    setReuseAddr(true);
   }
 
   private String extractRoomId(String uri) {
