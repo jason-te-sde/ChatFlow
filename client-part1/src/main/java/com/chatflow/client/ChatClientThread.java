@@ -43,8 +43,14 @@ public class ChatClientThread implements Runnable {
       for (int i = 0; i < messagesToSend; i++) {
         MessageWrapper wrapper = messageQueue.take();
         sendMessage(wrapper);
+
+        // Small delay to prevent overwhelming server
+        if (i % 10 == 0) {
+          Thread.sleep(5);
+        }
       }
 
+      // Process retries
       while (!retryQueue.isEmpty()) {
         MessageWrapper wrapper = retryQueue.poll();
         if (wrapper != null && wrapper.canRetry()) {
@@ -91,14 +97,17 @@ public class ChatClientThread implements Runnable {
         }
       };
 
-      client.connectBlocking();
-      connectionLatch.await();
+      // Set connection timeout
+      client.setConnectionLostTimeout(10);
+      client.connectBlocking(java.util.concurrent.TimeUnit.SECONDS.toMillis(5),
+          java.util.concurrent.TimeUnit.MILLISECONDS);
+      connectionLatch.await(3, java.util.concurrent.TimeUnit.SECONDS);
 
       if (client.isOpen()) {
         String messageJson = gson.toJson(wrapper.getMessage());
         client.send(messageJson);
 
-        boolean received = messageLatch.await(5, java.util.concurrent.TimeUnit.SECONDS);
+        boolean received = messageLatch.await(3, java.util.concurrent.TimeUnit.SECONDS);
         if (received) {
           successCount.incrementAndGet();
         } else {
@@ -108,12 +117,17 @@ public class ChatClientThread implements Runnable {
         handleFailure(wrapper);
       }
 
-      client.closeBlocking();
+      // Graceful close
+      if (client.isOpen()) {
+        client.closeBlocking();
+      }
     } catch (Exception e) {
       handleFailure(wrapper);
     } finally {
       if (client != null && client.isOpen()) {
-        client.close();
+        try {
+          client.close();
+        } catch (Exception ignored) {}
       }
     }
   }
