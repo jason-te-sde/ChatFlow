@@ -1,9 +1,6 @@
 package com.chatflow.client;
 
 import com.google.gson.Gson;
-import org.java_websocket.client.WebSocketClient;
-import org.java_websocket.handshake.ServerHandshake;
-
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
@@ -11,9 +8,6 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Main phase thread - maintains persistent WebSocket connections per room
- */
 public class MainPhaseClientThread implements Runnable {
   private final String serverUrl;
   private final BlockingQueue<MessageWrapper> messageQueue;
@@ -23,8 +17,7 @@ public class MainPhaseClientThread implements Runnable {
   private final Gson gson;
   private final int threadId;
 
-  // Connection cache: persistent connections per room for this thread
-  private final Map<Integer, WebSocketClient> connectionCache;
+  private final Map<Integer, ConnectionWithCallback> connectionCache;
 
   public MainPhaseClientThread(String serverUrl,
       BlockingQueue<MessageWrapper> messageQueue,
@@ -52,7 +45,7 @@ public class MainPhaseClientThread implements Runnable {
         if (wrapper == null) continue;
 
         int roomId = wrapper.getRoomId();
-        WebSocketClient client = getOrCreateConnection(roomId);
+        ConnectionWithCallback client = getOrCreateConnection(roomId);
 
         if (client == null) {
           metrics.recordFailure();
@@ -63,7 +56,6 @@ public class MainPhaseClientThread implements Runnable {
         sendMessage(client, wrapper, roomId);
         sent++;
 
-        // Progress reporting
         if (sent % 500 == 0 && threadId % 10 == 0) {
           System.out.println("Thread " + threadId + " progress: " + sent + "/" + messagesToSend);
         }
@@ -71,8 +63,7 @@ public class MainPhaseClientThread implements Runnable {
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     } finally {
-      // Close all persistent connections for this thread
-      for (WebSocketClient client : connectionCache.values()) {
+      for (ConnectionWithCallback client : connectionCache.values()) {
         if (client != null && client.isOpen()) {
           client.close();
         }
@@ -81,18 +72,13 @@ public class MainPhaseClientThread implements Runnable {
     }
   }
 
-  /**
-   * Get or create persistent connection for this room
-   * Implements connection pooling per thread
-   */
-  private WebSocketClient getOrCreateConnection(int roomId) {
-    WebSocketClient client = connectionCache.get(roomId);
+  private ConnectionWithCallback getOrCreateConnection(int roomId) {
+    ConnectionWithCallback client = connectionCache.get(roomId);
 
     if (client != null && client.isOpen()) {
-      return client; // Reuse persistent connection
+      return client;
     }
 
-    // Need to create/recreate connection
     if (client != null && !client.isOpen()) {
       metrics.recordReconnection();
     }
@@ -104,36 +90,24 @@ public class MainPhaseClientThread implements Runnable {
     return client;
   }
 
-  private WebSocketClient createConnection(int roomId) {
+  private ConnectionWithCallback createConnection(int roomId) {
     try {
       URI uri = new URI(serverUrl + "/chat/" + roomId);
       CountDownLatch connectLatch = new CountDownLatch(1);
       AtomicBoolean connectionSuccess = new AtomicBoolean(false);
 
-      WebSocketClient client = new WebSocketClient(uri) {
-        @Override
-        public void onOpen(ServerHandshake handshake) {
-          connectionSuccess.set(true);
-          connectLatch.countDown();
-        }
-
-        @Override
-        public void onMessage(String message) {
-        }
-
-        @Override
-        public void onClose(int code, String reason, boolean remote) {
-          metrics.recordConnectionClosed();
-        }
-
-        @Override
-        public void onError(Exception ex) {
-          connectLatch.countDown();
-        }
-      };
+      ConnectionWithCallback client = new ConnectionWithCallback(
+          uri,
+          () -> {
+            connectionSuccess.set(true);
+            connectLatch.countDown();
+          },
+          () -> {
+            metrics.recordConnectionClosed();
+          }
+      );
 
       boolean connected = client.connectBlocking(10, TimeUnit.SECONDS);
-      connectLatch.await(10, TimeUnit.SECONDS);
 
       if (connected && connectionSuccess.get()) {
         metrics.recordConnectionCreated();
@@ -146,7 +120,7 @@ public class MainPhaseClientThread implements Runnable {
     }
   }
 
-  private void sendMessage(WebSocketClient client, MessageWrapper wrapper, int roomId) {
+  private void sendMessage(ConnectionWithCallback client, MessageWrapper wrapper, int roomId) {
     int attempt = 0;
 
     while (attempt < 5) {
@@ -160,32 +134,21 @@ public class MainPhaseClientThread implements Runnable {
           }
         }
 
-        // TIMING: Record send time
         long sendTime = System.nanoTime();
-
         CountDownLatch responseLatch = new CountDownLatch(1);
-        AtomicBoolean received = new AtomicBoolean(false);
         AtomicLong receiveTime = new AtomicLong(0);
 
-        Thread responseThread = new Thread(() -> {
-          try {
-            Thread.sleep(50);
-            received.set(true);
-            receiveTime.set(System.nanoTime());
-            responseLatch.countDown();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
+        client.setResponseCallback((receiveTimeNanos) -> {
+          receiveTime.set(receiveTimeNanos);
+          responseLatch.countDown();
         });
-        responseThread.start();
 
         String messageJson = gson.toJson(wrapper.getMessage());
         client.send(messageJson);
 
         boolean responded = responseLatch.await(3, TimeUnit.SECONDS);
 
-        if (responded && received.get()) {
-          // Calculate latency and record detailed metric
+        if (responded && receiveTime.get() > 0) {
           long latencyMs = (receiveTime.get() - sendTime) / 1_000_000;
           metrics.recordDetailedMetric(
               System.currentTimeMillis(),

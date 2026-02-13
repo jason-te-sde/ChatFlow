@@ -28,18 +28,22 @@ public class LoadTestClient {
     System.out.println("=".repeat(70));
 
     // Start message generator
-    Thread generatorThread = new Thread(
-        new MessageGenerator(messageQueue, TOTAL_MESSAGES),
-        "MessageGenerator"
-    );
+    MessageGenerator generator = new MessageGenerator(messageQueue, TOTAL_MESSAGES);
+    Thread generatorThread = new Thread(generator, "MessageGenerator");
     generatorThread.start();
     System.out.println("✓ Message generator thread started");
 
-    try {
-      Thread.sleep(2000);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
+    // Wait for initial messages to be generated
+    System.out.println("Waiting for initial message buffer...");
+    while (messageQueue.size() < 5000) {
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        break;
+      }
     }
+    System.out.println("Buffer ready with " + messageQueue.size() + " messages");
 
     // WARMUP PHASE
     System.out.println("\n--- WARMUP PHASE ---");
