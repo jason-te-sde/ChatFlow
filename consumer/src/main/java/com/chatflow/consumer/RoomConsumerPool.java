@@ -33,6 +33,12 @@ public class RoomConsumerPool {
   @Value("${rabbitmq.port:5672}")
   private int rabbitPort;
 
+  @Value("${rabbitmq.username:guest}")
+  private String rabbitUsername;
+
+  @Value("${rabbitmq.password:guest}")
+  private String rabbitPassword;
+
   @Autowired
   private SessionRegistry registry;
 
@@ -51,6 +57,8 @@ public class RoomConsumerPool {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost(rabbitHost);
         factory.setPort(rabbitPort);
+        factory.setUsername(rabbitUsername);
+        factory.setPassword(rabbitPassword);
         factory.setAutomaticRecoveryEnabled(true);
 
         Connection conn = factory.newConnection();

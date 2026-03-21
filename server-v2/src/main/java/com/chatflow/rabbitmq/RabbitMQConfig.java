@@ -23,17 +23,25 @@ public class RabbitMQConfig {
   @Value("${rabbitmq.port:5672}")
   private int port;
 
+  @Value("${rabbitmq.username:guest}")
+  private String username;
+
+  @Value("${rabbitmq.password:guest}")
+  private String password;
+
   @Autowired
   private ChannelPool channelPool;
 
   @PostConstruct
   public void setup() throws IOException, TimeoutException {
-    channelPool.init(host, port);
+    channelPool.init(host, port, username, password);
 
-    // Declare exchange and queues once at startup
     ConnectionFactory factory = new ConnectionFactory();
     factory.setHost(host);
     factory.setPort(port);
+    factory.setUsername(username);
+    factory.setPassword(password);
+
     try (Connection conn = factory.newConnection();
         Channel ch = conn.createChannel()) {
       ch.exchangeDeclare(EXCHANGE, "topic", true);
