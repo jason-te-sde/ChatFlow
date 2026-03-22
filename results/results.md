@@ -20,14 +20,14 @@
 
 ### 2.1 System Architecture Diagram
 
-<img src="system_architecture.png" height="400">
+<img src="system_architecture.png" height="200">
 
 ### 2.2 Message Flow Sequence Diagram
 
-<img src="message_flow_sequence.png" height="300">
+<img src="message_flow_sequence.png" height="200">
 
 ### 2.3 Queue Topology Design
-<img src="queue_topology.png" height="300">
+<img src="queue_topology.png" height="200">
 
 - **Exchange:** `chat.exchange`, type: `topic`, durable: `true`
 - **Queues:** `room.1` through `room.20`, durable: `true`
@@ -38,7 +38,7 @@
 - **Delivery:** manual ack after successful broadcast (at-least-once)
 
 ### 2.4 Consumer Threading Model
-<img src="consumer_threading_model.png" height="300">
+<img src="consumer_threading_model.png" height="200">
 
 Each consumer thread:
 1. Creates its own RabbitMQ connection and channel
@@ -83,9 +83,9 @@ Sticky sessions are required because WebSocket is stateful — after the HTTP up
 
 <img src="S1-local-client-result.png" height="200">
 
-<img src="S2-local-overview.png" height="300">
+<img src="S2-local-overview.png" height="200">
 
-<img src="S3-local-connections.png" height="300">
+<img src="S3-local-connections.png" height="400">
 
 Queue depth reached a brief peak then returned to 0, indicating consumers kept pace with producers. Publish and consumer ack rates were nearly equal, confirming no message loss.
 
@@ -95,9 +95,9 @@ Queue depth reached a brief peak then returned to 0, indicating consumers kept p
 
 <img src="L2-aws-2-results.png" height="200">
 
-<img src="L1-aws-2-overview.png" height="300">
+<img src="L1-aws-2-overview.png" height="200">
 
-<img src="L3-aws-2-targets.png" height="300">
+<img src="L3-aws-2-targets.png" height="200">
 
 ---
 
@@ -106,9 +106,9 @@ Queue depth reached a brief peak then returned to 0, indicating consumers kept p
 
 <img src="F2-aws-4-results-50.png" height="200">
 
-<img src="F1-aws-4-overview-100.png" height="300">
+<img src="F1-aws-4-overview-100.png" height="200">
 
-<img src="F4-aws-4-targets.png" height="300">
+<img src="F4-aws-4-targets.png" height="200">
 
 ---
 
@@ -118,7 +118,7 @@ Queue depth reached a brief peak then returned to 0, indicating consumers kept p
 <img src="F3-aws-4-results-100.png" height="200">
 
 
-<img src="F5-aws-4-request-count.png" height="300">
+<img src="F5-aws-4-request-count.png" height="200">
 
 ---
 
