@@ -6,13 +6,13 @@
 
 ## 1. Git Repository Structure
 
-```
-/server-v2      WebSocket server with RabbitMQ producer integration
-/consumer       Consumer application — pulls from queue and broadcasts
-/client         Multithreaded load test client (500K / 1M messages)
-/deployment     Deployment scripts and configuration guide
-/monitoring     Monitoring tools and RabbitMQ management guide
-```
+
+- [`/server-v2`](https://github.com/jason-te-sde/ChatFlow/tree/assignment2/server-v2) - WebSocket server with RabbitMQ producer integration
+- [`/consumer`](https://github.com/jason-te-sde/ChatFlow/tree/assignment2/consumer) - Consumer application — pulls from queue and broadcasts
+- [`/client`](https://github.com/jason-te-sde/ChatFlow/tree/assignment2/client)     -    Multithreaded load test client (500K / 1M messages)
+- [`/deployment`](https://github.com/jason-te-sde/ChatFlow/tree/assignment2/deployment)  -   Deployment scripts and configuration guide
+- [`/monitoring`](https://github.com/jason-te-sde/ChatFlow/tree/assignment2/monitoring)   -  Monitoring tools and RabbitMQ management guide
+
 
 ---
 
@@ -20,52 +20,14 @@
 
 ### 2.1 System Architecture Diagram
 
-```
-Client (local machine)
-        │
-        ▼
-AWS Application Load Balancer
-(HTTP:80, sticky session cookie)
-        │
-        ├──▶ WS Server 1 (EC2 t2.micro, :8080)
-        ├──▶ WS Server 2 (EC2 t2.micro, :8080)
-        ├──▶ WS Server 3 (EC2 t2.micro, :8080)
-        └──▶ WS Server 4 (EC2 t2.micro, :8080)
-                       │
-                       │  basicPublish
-                       ▼
-              RabbitMQ (EC2 t2.micro)
-              Exchange: chat.exchange (topic, durable)
-              Queues: room.1 ~ room.20
-              TTL: 60s, max-length: 100k
-                       │
-                       │  basicConsume
-                       ▼
-              Consumer App (EC2 t2.micro)
-                       │
-                       │  broadcast
-                       ▼
-              WebSocket sessions in room
-```
+<img src="system_architecture.png" height="400">
 
 ### 2.2 Message Flow Sequence Diagram
 
-```
-Client        ALB          WS Server       RabbitMQ       Consumer
-  │            │               │               │              │
-  │─connect──▶ │─route──────▶  │               │              │
-  │            │  (sticky)     │               │              │
-  │─send msg─▶ │─────────────▶ │               │              │
-  │            │               │─basicPublish─▶│              │
-  │            │               │ room.{roomId} │              │
-  │◀─ack────── │◀────────────  │               │              │
-  │            │               │               │─deliver────▶ │
-  │            │               │               │              │─broadcast
-  │            │               │               │◀─basicAck─── │  to all
-  │            │               │               │              │  sessions
-```
+<img src="message_flow_sequence.png" height="300">
 
 ### 2.3 Queue Topology Design
+<img src="queue_topology.png" height="300">
 
 - **Exchange:** `chat.exchange`, type: `topic`, durable: `true`
 - **Queues:** `room.1` through `room.20`, durable: `true`
@@ -76,20 +38,7 @@ Client        ALB          WS Server       RabbitMQ       Consumer
 - **Delivery:** manual ack after successful broadcast (at-least-once)
 
 ### 2.4 Consumer Threading Model
-
-```
-RoomConsumerPool (Spring Component)
-│
-├── ExecutorService (fixed thread pool, 20 threads)
-│   ├── Thread-1  → basicConsume(room.1)  → SessionRegistry → broadcast
-│   ├── Thread-2  → basicConsume(room.2)  → SessionRegistry → broadcast
-│   ├── ...
-│   └── Thread-20 → basicConsume(room.20) → SessionRegistry → broadcast
-│
-└── SessionRegistry
-    ├── ConcurrentHashMap<String, Set<WebSocketSession>>  (roomSessions)
-    └── ConcurrentHashMap<String, UserInfo>               (activeUsers)
-```
+<img src="consumer_threading_model.png" height="300">
 
 Each consumer thread:
 1. Creates its own RabbitMQ connection and channel
@@ -132,27 +81,11 @@ Sticky sessions are required because WebSocket is stateful — after the HTTP up
 
 ### 3.1 Single Instance Baseline (Local)
 
-**[Insert screenshot S1: client terminal output]**
+<img src="S1-local-client-result.png" height="200">
 
-```
-Messages sent:    499968
-Messages failed:  0
-Total time:       6.62 s
-Throughput:       75478 msg/s
-Mean latency:     0.1 ms
-Median latency:   0 ms
-p95 latency:      0 ms
-p99 latency:      1 ms
-Min/Max latency:  0 / 569 ms
+<img src="S2-local-overview.png" height="300">
 
-Throughput over time (10s buckets):
-t+  0s | ########################################## 422658
-t+ 10s | ########################################## 77310
-```
-
-**[Insert screenshot S2: RabbitMQ Overview — queue depths + message rates折线图]**
-
-**[Insert screenshot S3: RabbitMQ Connections page]**
+<img src="S3-local-connections.png" height="300">
 
 Queue depth reached a brief peak then returned to 0, indicating consumers kept pace with producers. Publish and consumer ack rates were nearly equal, confirming no message loss.
 
@@ -160,78 +93,32 @@ Queue depth reached a brief peak then returned to 0, indicating consumers kept p
 
 ### 3.2 Load Balanced Test — 2 Instances
 
-**[Insert screenshot L2: client terminal output]**
+<img src="L2-aws-2-results.png" height="200">
 
-```
-Messages sent:    499968
-Messages failed:  0
-Total time:       3.90 s
-Throughput:       128197 msg/s
-Mean latency:     0.1 ms
-Median latency:   0 ms
-p95 latency:      0 ms
-p99 latency:      0 ms
-Min/Max latency:  0 / 551 ms
+<img src="L1-aws-2-overview.png" height="300">
 
-Throughput over time (10s buckets):
-t+  0s | ########################################## 499968
-```
-
-**[Insert screenshot L1: RabbitMQ Overview折线图 — 2 instances]**
-
-**[Insert screenshot L3: ALB Target Group — 2 instances healthy]**
+<img src="L3-aws-2-targets.png" height="300">
 
 ---
 
 ### 3.3 Load Balanced Test — 4 Instances (500K messages)
 
-**[Insert screenshot F2: client terminal output — 500K]**
 
-```
-Messages sent:    499968
-Messages failed:  0
-Total time:       3.85 s
-Throughput:       129727 msg/s
-Mean latency:     0.1 ms
-Median latency:   0 ms
-p95 latency:      0 ms
-p99 latency:      0 ms
-Min/Max latency:  0 / 578 ms
+<img src="F2-aws-4-results-50.png" height="200">
 
-Throughput over time (10s buckets):
-t+  0s | ########################################## 499968
-```
+<img src="F1-aws-4-overview-100.png" height="300">
 
-**[Insert screenshot F1: RabbitMQ Overview折线图 — 4 instances]**
-
-**[Insert screenshot F4: ALB Target Group — 4 instances healthy]**
+<img src="F4-aws-4-targets.png" height="300">
 
 ---
 
 ### 3.4 Stress Test — 4 Instances (1M messages)
 
-**[Insert screenshot F3: client terminal output — 1M]**
 
-```
-Messages sent:    999920
-Messages failed:  16
-Total time:       40.91 s
-Throughput:       24442 msg/s
-Mean latency:     2.6 ms
-Median latency:   0 ms
-p95 latency:      0 ms
-p99 latency:      1 ms
-Min/Max latency:  0 / 19490 ms
+<img src="F3-aws-4-results-100.png" height="200">
 
-Throughput over time (10s buckets):
-t+  0s  | ########################################## 745035
-t+ 10s  | ########################################## 140795
-t+ 20s  | ########################################## 46418
-t+ 30s  | ########################################## 64524
-t+ 40s  | ######                                     3148
-```
 
-**[Insert screenshot ALB Requests: ALB request count chart]**
+<img src="F5-aws-4-request-count.png" height="300">
 
 ---
 
@@ -292,8 +179,8 @@ t+ 40s  | ######                                     3148
 ### Instance Types
 
 | Component | Instance type | Count |
-|---|---|---|
-| WS Server (2-instance test) | t2.micro | 2 |
-| WS Server (4-instance test) | t2.micro | 4 |
-| Consumer | t2.micro | 1 |
-| RabbitMQ | t2.micro | 1 |
+|---|---------------|---|
+| WS Server (2-instance test) | t3.micro      | 2 |
+| WS Server (4-instance test) | t3.micro      | 4 |
+| Consumer | t3.micro      | 1 |
+| RabbitMQ | t3.micro      | 1 |
