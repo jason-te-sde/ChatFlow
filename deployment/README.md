@@ -2,28 +2,26 @@
 
 ## Prerequisites
 
-- AWS account with EC2 access (us-west-2)
-- Java 21, Maven 3.8+ installed locally
+- AWS account, us-west-2 region
+- Java 21+, Maven 3.8+ installed locally
 - SSH key pair (.pem file)
 
----
+## EC2 Instances
 
-## EC2 Instances Required
-
-| Role | Name | Type | Ports |
+| Role | Name | Type | Inbound ports |
 |---|---|---|---|
 | RabbitMQ | chatflow-rabbitmq | t2.micro | 22, 5672, 15672 |
 | WS Server 1 | chatflow-server-1 | t2.micro | 22, 8080 |
 | WS Server 2 | chatflow-server-2 | t2.micro | 22, 8080 |
+| WS Server 3 | chatflow-server-3 | t2.micro | 22, 8080 |
+| WS Server 4 | chatflow-server-4 | t2.micro | 22, 8080 |
 | Consumer | chatflow-consumer | t2.micro | 22 |
 
-All instances: Ubuntu 22.04 LTS, us-west-2.
+All instances: Ubuntu 22.04 LTS
 
 ---
 
 ## Step 1 — Install Java on all EC2 instances
-
-Run on each instance:
 
 ```bash
 sudo apt-get update
@@ -52,29 +50,43 @@ sudo rabbitmqctl set_permissions -p / chatflow ".*" ".*" ".*"
 sudo systemctl status rabbitmq-server
 ```
 
-Management UI: `http://<rabbitmq-public-ip>:15672` (login: chatflow / chatflow123)
+Management UI: `http://<rabbitmq-public-ip>:15672` (chatflow / chatflow123)
 
 ---
 
-## Step 3 — Build and upload server
-
-On your local machine:
+## Step 3 — Build locally
 
 ```bash
-cd server-v2
-mvn clean package -DskipTests
-
-scp -i your-key.pem target/server-v2-1.0.0.jar ubuntu@<server1-public-ip>:~/
-scp -i your-key.pem target/server-v2-1.0.0.jar ubuntu@<server2-public-ip>:~/
+cd server-v2 && mvn clean package -DskipTests
+cd ../consumer && mvn clean package -DskipTests
 ```
 
 ---
 
-## Step 4 — Start WS Servers
-
-On `chatflow-server-1`:
+## Step 4 — Upload JARs
 
 ```bash
+# Server (repeat for each server EC2)
+scp -i your-key.pem \
+  server-v2/target/server-v2-1.0.0.jar \
+  ubuntu@<server-public-ip>:~/
+
+# Consumer
+scp -i your-key.pem \
+  consumer/target/consumer-1.0.0.jar \
+  ubuntu@<consumer-public-ip>:~/
+```
+
+---
+
+## Step 5 — Start WS Servers
+
+On each server EC2 (change `server.id` for each):
+
+```bash
+# Kill any existing process
+pkill -f server-v2
+
 nohup java -jar server-v2-1.0.0.jar \
   --rabbitmq.host=<rabbitmq-private-ip> \
   --rabbitmq.username=chatflow \
@@ -83,66 +95,52 @@ nohup java -jar server-v2-1.0.0.jar \
   > server.log 2>&1 &
 
 # Verify
-curl http://localhost:8080/health
-```
-
-On `chatflow-server-2` (change server.id):
-
-```bash
-nohup java -jar server-v2-1.0.0.jar \
-  --rabbitmq.host=<rabbitmq-private-ip> \
-  --rabbitmq.username=chatflow \
-  --rabbitmq.password=chatflow123 \
-  --server.id=server-2 \
-  > server.log 2>&1 &
-
-curl http://localhost:8080/health
+sleep 5 && curl http://localhost:8080/health
+# Expected: {"status":"ok"}
 ```
 
 ---
 
-## Step 5 — Build and deploy Consumer
-
-On your local machine:
+## Step 6 — Start Consumer
 
 ```bash
-cd consumer
-mvn clean package -DskipTests
+pkill -f consumer
 
-scp -i your-key.pem target/consumer-1.0.0.jar ubuntu@<consumer-public-ip>:~/
-```
-
-On `chatflow-consumer`:
-
-```bash
 nohup java -jar consumer-1.0.0.jar \
   --rabbitmq.host=<rabbitmq-private-ip> \
   --rabbitmq.username=chatflow \
   --rabbitmq.password=chatflow123 \
   > consumer.log 2>&1 &
 
-tail -f consumer.log
-# Should see: Started consumer threads for room.1 ... room.20
+# Verify
+sleep 5 && tail -5 consumer.log
+# Expected: Started consumer threads
 ```
 
 ---
 
-## Step 6 — Configure ALB
+## Step 7 — Configure ALB
 
-1. EC2 → Load Balancers → Create → Application Load Balancer
+1. EC2 → Load Balancers → Create → **Application Load Balancer**
 2. Name: `chatflow-alb`, Scheme: Internet-facing, VPC: default
 3. Security group: allow inbound HTTP port 80
-4. Create Target Group:
-    - Name: `chatflow-servers`, Protocol: HTTP, Port: 8080
+4. **Create Target Group:**
+    - Name: `chatflow-servers`
+    - Protocol: HTTP, Port: 8080
     - Health check path: `/health`
-    - Register server-1 and server-2
+    - Health check interval: 30s, healthy threshold: 2, unhealthy threshold: 3
+    - Register all server instances
 5. Listener: HTTP:80 → forward to `chatflow-servers`
-6. After creation: Target Groups → `chatflow-servers` → Attributes → Edit
-    - Enable Stickiness: Load balancer generated cookie, Duration: 1 day
+6. After creation — **enable sticky sessions:**
+    - Target Groups → `chatflow-servers` → Attributes → Edit
+    - Stickiness: Load balancer generated cookie, Duration: 1 day
+7. **Set idle timeout:**
+    - Load Balancers → `chatflow-alb` → Attributes → Edit
+    - Idle timeout: 4000 seconds
 
 ---
 
-## Step 7 — Run load test
+## Step 8 — Run load test
 
 Edit `client/src/main/java/com/chatflow/LoadTestClient.java`:
 
@@ -153,21 +151,26 @@ static final String SERVER_URL = "ws://<alb-dns-name>/chat/";
 ```bash
 cd client
 mvn clean package -DskipTests
+
+# 500K test
+java -jar target/client-1.0.0.jar
+
+# 1M stress test (change TOTAL_MESSAGES = 1_000_000 first, then repackage)
 java -jar target/client-1.0.0.jar
 ```
 
 ---
 
-## Stopping all services
+## Stop All Services
 
 ```bash
-# On each server/consumer EC2
+# On each server / consumer EC2
 pkill -f "server-v2\|consumer"
 
-# Stop RabbitMQ
+# RabbitMQ
 sudo systemctl stop rabbitmq-server
 
-# Local Docker (if running locally)
+# Local Docker
 docker stop rabbitmq && docker rm rabbitmq
 ```
 
@@ -177,9 +180,9 @@ docker stop rabbitmq && docker rm rabbitmq
 
 | Parameter | Default | Description |
 |---|---|---|
-| `rabbitmq.host` | localhost | RabbitMQ host |
+| `rabbitmq.host` | localhost | RabbitMQ hostname or IP |
 | `rabbitmq.port` | 5672 | RabbitMQ AMQP port |
 | `rabbitmq.username` | guest | RabbitMQ username |
 | `rabbitmq.password` | guest | RabbitMQ password |
-| `server.id` | server-1 | Server identifier in queue messages |
-| `server.port` | 8080 | HTTP/WebSocket port |
+| `server.id` | server-1 | Identifies server in queue messages |
+| `server.port` | 8080 | HTTP / WebSocket port |
