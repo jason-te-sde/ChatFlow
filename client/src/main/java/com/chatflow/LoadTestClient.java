@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.*;
 public class LoadTestClient {
 
   static final String SERVER_URL  = "ws://chatflow-alb-1796650720.us-east-1.elb.amazonaws.com/chat/";
-  static final int TOTAL_MESSAGES = 500_000;
+  static final int TOTAL_MESSAGES = 1_000_000;
   static final int WARMUP_THREADS = 32;
   static final int WARMUP_MSGS    = 1000;
   static final int MAIN_THREADS   = 128;
