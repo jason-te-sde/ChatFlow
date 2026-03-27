@@ -1,4 +1,4 @@
-# Monitoring Guide — ChatFlow Assignment 2
+# Monitoring Guide — ChatFlow Assignment 3
 
 ## RabbitMQ Management UI
 
@@ -73,7 +73,60 @@ In AWS Console → EC2 → Load Balancers → `chatflow-alb` → Monitoring:
 
 ---
 
-## Key Performance Targets (Assignment 2)
+---
+
+## MySQL Metrics (Assignment 3)
+
+### During load test — run on MySQL EC2
+
+```bash
+# CPU and memory usage
+top -bn3 | grep -E "Cpu|Mem|mysql"
+
+# DB write progress
+watch -n 10 "mysql -u chatflow -pchatflow123 -h localhost chatflow \
+  -e 'SELECT COUNT(*) as written, NOW() as time FROM messages;'"
+
+# Active connections
+mysql -u chatflow -pchatflow123 -h localhost chatflow \
+  -e "SHOW STATUS LIKE 'Threads_connected';"
+
+# InnoDB buffer pool hit ratio
+mysql -u chatflow -pchatflow123 -h localhost chatflow \
+  -e "SHOW STATUS LIKE 'Innodb_buffer_pool%';"
+```
+
+### Metrics API Endpoints
+
+```bash
+# Full summary (call after test completes)
+curl http://<alb-dns>/metrics/summary
+
+# Room messages in time range
+curl "http://<alb-dns>/metrics/room/1?start=2026-01-01T00:00:00Z&end=2026-12-31T23:59:59Z"
+
+# User history
+curl http://<alb-dns>/metrics/user/1
+
+# Active users
+curl "http://<alb-dns>/metrics/active-users?start=2026-01-01T00:00:00Z&end=2026-12-31T23:59:59Z"
+
+# User rooms
+curl http://<alb-dns>/metrics/user/1/rooms
+```
+
+## Key Performance Targets
+
+| Metric | Target | Achieved |
+|---|---|---|
+| DB write throughput | sustained | 19,693 msg/s (endurance) |
+| DB failed writes | 0 | 0 (all tests) |
+| Query 1 response | <100ms | 1.425s (limited by t3.micro) |
+| Query 2 response | <200ms | 0.277s ✅ |
+| Query 3 response | <500ms | 1.179s (limited by t3.micro) |
+| Query 4 response | <50ms | 0.249s ✅ |
+| Memory leak | none | none detected |
+| Connection exhaustion | none | none detected |
 
 | Metric | Target | Achieved |
 |---|---|---|

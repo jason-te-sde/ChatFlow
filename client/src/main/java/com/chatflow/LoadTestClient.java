@@ -12,9 +12,10 @@ import java.util.concurrent.atomic.*;
 
 public class LoadTestClient {
 
-  static final String SERVER_URL  = "ws://chatflow-alb-1796650720.us-east-1.elb.amazonaws.com/chat/";
-  static final int TOTAL_MESSAGES = 1_000_000;
-  static final int WARMUP_THREADS = 32;
+  static final String SERVER_URL   = "ws://chatflow-alb-1796650720.us-east-1.elb.amazonaws.com/chat/";
+  static final String METRICS_URL  = "http://chatflow-alb-1796650720.us-east-1.elb.amazonaws.com/metrics/summary";
+  static final int TOTAL_MESSAGES  = 10_000_000;
+  static final int WARMUP_THREADS = 128;
   static final int WARMUP_MSGS    = 1000;
   static final int MAIN_THREADS   = 128;
 
@@ -70,6 +71,29 @@ public class LoadTestClient {
 
     long totalMs = System.currentTimeMillis() - wallStart;
     printResults(totalMs);
+    fetchAndPrintMetrics();
+  }
+
+  static void fetchAndPrintMetrics() {
+    try {
+      // Wait a few seconds for DB writes to flush
+      Thread.sleep(5000);
+      java.net.http.HttpClient http = java.net.http.HttpClient.newHttpClient();
+      java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+          .uri(java.net.URI.create(METRICS_URL))
+          .GET().build();
+      java.net.http.HttpResponse<String> resp =
+          http.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+      System.out.println("\n========== METRICS API RESULTS ==========");
+      // Pretty print JSON
+      com.fasterxml.jackson.databind.ObjectMapper om =
+          new com.fasterxml.jackson.databind.ObjectMapper();
+      Object json = om.readValue(resp.body(), Object.class);
+      System.out.println(om.writerWithDefaultPrettyPrinter().writeValueAsString(json));
+      System.out.println("==========================================");
+    } catch (Exception e) {
+      System.err.println("Failed to fetch metrics: " + e.getMessage());
+    }
   }
 
   static void runPhase(int nThreads, int msgsEach) throws InterruptedException {
