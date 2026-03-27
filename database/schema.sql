@@ -1,7 +1,6 @@
 CREATE DATABASE IF NOT EXISTS chatflow;
 USE chatflow;
 
--- Core messages table
 CREATE TABLE IF NOT EXISTS messages (
                                         message_id   VARCHAR(36)  NOT NULL,
     room_id      VARCHAR(10)  NOT NULL,
@@ -11,18 +10,16 @@ CREATE TABLE IF NOT EXISTS messages (
     message_type ENUM('TEXT','JOIN','LEAVE') NOT NULL DEFAULT 'TEXT',
     server_id    VARCHAR(20)  NOT NULL,
     created_at   DATETIME(3)  NOT NULL,
-    PRIMARY KEY (message_id),
-    -- Query 1: messages for a room in time range
+    -- Partition key must be part of PRIMARY KEY
+    PRIMARY KEY (message_id, room_id),
     INDEX idx_room_time (room_id, created_at),
-    -- Query 2: user message history
     INDEX idx_user_time (user_id, created_at),
-    -- Query 4: rooms user participated in
     INDEX idx_user_room (user_id, room_id)
     ) ENGINE=InnoDB
     DEFAULT CHARSET=utf8mb4
-    ROW_FORMAT=COMPRESSED;
+    ROW_FORMAT=COMPRESSED
+    PARTITION BY KEY(room_id) PARTITIONS 20;
 
--- Pre-aggregated stats per minute (for analytics queries)
 CREATE TABLE IF NOT EXISTS message_stats (
                                              stat_time    DATETIME     NOT NULL,
                                              room_id      VARCHAR(10)  NOT NULL,

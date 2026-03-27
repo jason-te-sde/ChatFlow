@@ -14,7 +14,7 @@ public class LoadTestClient {
 
   static final String SERVER_URL   = "ws://chatflow-alb-1796650720.us-east-1.elb.amazonaws.com/chat/";
   static final String METRICS_URL  = "http://chatflow-alb-1796650720.us-east-1.elb.amazonaws.com/metrics/summary";
-  static final int TOTAL_MESSAGES  = 10_000_000;
+  static final int TOTAL_MESSAGES  = 500_000;
   static final int WARMUP_THREADS = 128;
   static final int WARMUP_MSGS    = 1000;
   static final int MAIN_THREADS   = 128;
